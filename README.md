@@ -26,6 +26,8 @@ workers compete, and when a worker dies mid-flight.
 │  POST /api/events   validate → persist → enqueue → 202│
 │  GET  /api/events   list                              │
 │  GET  /api/events/:id   status + result + audit trail │
+│  POST /api/events/:id/retry   re-queue a failed event │
+│  GET  /api/employees/:id/profile   applied state      │
 │  GET  /api/health   Postgres + Redis probe            │
 └───────┬───────────────────────────────┬───────────────┘
         │ write (source of truth)       │ enqueue (jobId = event.id)
@@ -292,12 +294,22 @@ curl -X POST http://localhost:3001/api/events/<id>/retry
 # → 202 when the event dead-lettered after transient failures
 # → 409 when it failed permanently; add ?force=true to retry it anyway
 
+# What the events actually produced
+curl http://localhost:3001/api/employees/emp-1001/profile
+# → 404 until the employee's first event succeeds
+
 # Health
 curl http://localhost:3001/api/health
 ```
 
 Demo a permanent failure with `"newSalary": 2000000` (above the approval
 limit), and an invalid request with `"currency": "XYZ"`.
+
+The profile endpoint is what makes the guarantees observable. Submit three
+salary changes for one employee and poll it: `lastAppliedSequence` climbs in
+accept order and settles on the last event, and a duplicate submission does not
+move it. Without this, ordering and single-apply could only be checked in a
+database client.
 
 Retry moves the event back to `PENDING_RETRY` and re-enqueues it. Two details
 matter: `attempts` is never reset (it records total effort, so `maxAttempts` is
@@ -321,6 +333,7 @@ pnpm --filter api test:e2e    # functional + e2e — needs Postgres and Redis
 | **Functional** | `test/events.e2e-spec.ts`     | The HTTP contract against real Postgres and Redis, with **no worker running** — which is what proves submission does not process inline. Validation, 202 vs 200, concurrent deduplication, 404/400.                                                                |
 | **End-to-end** | `test/processing.e2e-spec.ts` | API + worker + both datastores in one process. Successful processing, result persistence, transient retry then success, permanent failure without retry, dead-lettering, duplicate applied once, redelivery no-op, per-employee ordering, crashed-worker recovery. |
 | **End-to-end** | `test/retry.e2e-spec.ts`      | Operator retry: a dead-lettered event re-runs and applies, the audit trail records the manual step, a permanent failure is refused without `force`, and two simultaneous retries apply the change once.                                                            |
+| **End-to-end** | `test/profile.e2e-spec.ts`    | The applied state read back over HTTP: 404 until an event succeeds, settles on the last event accepted, merges different event types into one record, and is untouched by a duplicate submission.                                                                  |
 
 The provider is stubbed per test rather than left random — a randomly failing
 dependency makes for a flaky suite, and each failure mode deserves its own
