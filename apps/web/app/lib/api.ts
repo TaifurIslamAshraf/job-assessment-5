@@ -42,6 +42,21 @@ export interface Transition {
   createdAt: string;
 }
 
+export interface EmployeeProfile {
+  employeeId: string;
+  iban: string | null;
+  address: {
+    street: string | null;
+    city: string | null;
+    postalCode: string | null;
+    country: string | null;
+  } | null;
+  salary: { amount: number; currency: string | null } | null;
+  lastAppliedSequence: number | null;
+  lastAppliedEventId: string | null;
+  updatedAt: string;
+}
+
 export interface RetryResponse {
   id: string;
   status: EventStatus;
@@ -95,6 +110,11 @@ export const api = {
     request<RetryResponse>(`/events/${id}/retry${force ? "?force=true" : ""}`, {
       method: "POST",
     }),
+
+  profile: (employeeId: string) =>
+    request<EmployeeProfile>(
+      `/employees/${encodeURIComponent(employeeId)}/profile`,
+    ),
 
   health: () =>
     request<{ status: string; checks: Record<string, { status: string }> }>(

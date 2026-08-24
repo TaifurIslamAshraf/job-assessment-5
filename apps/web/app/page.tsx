@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { EmployeeProfile } from "./components/EmployeeProfile";
 import { EventDetail } from "./components/EventDetail";
 import { SubmitForm } from "./components/SubmitForm";
 import { api, type PayrollEvent } from "./lib/api";
@@ -11,6 +12,8 @@ export default function Page() {
   const [selected, setSelected] = useState<string | null>(null);
   const [health, setHealth] = useState<string>("…");
   const [error, setError] = useState<string | null>(null);
+
+  const selectedEmployee = events.find((e) => e.id === selected)?.employeeId;
 
   const refresh = useCallback(async () => {
     try {
@@ -101,6 +104,10 @@ export default function Page() {
               </table>
             )}
           </div>
+
+          {selectedEmployee && (
+            <EmployeeProfile employeeId={selectedEmployee} />
+          )}
 
           {selected && <EventDetail id={selected} />}
         </div>
