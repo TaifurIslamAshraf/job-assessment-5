@@ -1,0 +1,13 @@
+# Compiled output
+dist
+node_modules
+
+# Prisma generated client
+src/generated
+
+# Tests
+coverage
+.nyc_output
+
+# Env
+.env

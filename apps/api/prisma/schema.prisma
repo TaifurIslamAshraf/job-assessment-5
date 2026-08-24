@@ -1,0 +1,127 @@
+// Payroll event processing service — data model.
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum PayrollEventType {
+  BANK_ACCOUNT_CHANGE
+  ADDRESS_CHANGE
+  SALARY_CHANGE
+}
+
+/// Lifecycle of a submitted event. Transitions are recorded in
+/// PayrollEventTransition so an engineer can reconstruct what happened.
+///
+///   ACCEPTED ──> PROCESSING ──> SUCCEEDED
+///       ^             │
+///       │             ├──> PENDING_RETRY ──> PROCESSING   (transient failure)
+///       └─────────────┘
+///                     └──> FAILED                          (permanent failure)
+enum PayrollEventStatus {
+  ACCEPTED
+  PROCESSING
+  PENDING_RETRY
+  SUCCEEDED
+  FAILED
+}
+
+model PayrollEvent {
+  id String @id @default(uuid())
+
+  /// Client-supplied (or server-derived) key that makes submission idempotent.
+  /// A retried HTTP request reuses this key and returns the original event
+  /// instead of creating a second one.
+  idempotencyKey String @unique
+
+  employeeId    String
+  type          PayrollEventType
+  effectiveDate DateTime @db.Date
+
+  /// Type-specific fields, already validated against the DTO for `type`.
+  /// Kept as JSONB so new event types need no migration.
+  payload Json
+
+  status PayrollEventStatus @default(ACCEPTED)
+
+  /// Monotonic accept order. Ordering within an employee is decided by this,
+  /// not by queue arrival, so a redelivered job cannot overtake its predecessor.
+  sequence Int @unique @default(autoincrement())
+
+  attempts    Int @default(0)
+  maxAttempts Int @default(5)
+
+  /// Result recorded by the simulated payroll provider on success.
+  result Json?
+
+  /// Populated on failure. `failureCode` distinguishes transient from
+  /// permanent so the retry policy and the UI can both reason about it.
+  failureCode   String?
+  failureReason String?
+
+  /// Identifies the worker that currently holds the claim. Combined with
+  /// `lockedAt` this makes a crashed worker's stuck event recoverable.
+  lockedBy String?
+  lockedAt DateTime?
+
+  acceptedAt          DateTime  @default(now())
+  processingStartedAt DateTime?
+  completedAt         DateTime?
+  updatedAt           DateTime  @updatedAt
+
+  transitions PayrollEventTransition[]
+
+  /// Drives the "is an earlier event for this employee still open?" check.
+  @@index([employeeId, sequence])
+  @@index([status, sequence])
+}
+
+/// Append-only audit trail. One row per state change, never updated.
+model PayrollEventTransition {
+  id      String       @id @default(uuid())
+  event   PayrollEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId String
+
+  fromStatus PayrollEventStatus?
+  toStatus   PayrollEventStatus
+  attempt    Int                 @default(0)
+
+  message  String?
+  metadata Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([eventId, createdAt])
+}
+
+/// The state a payroll event actually mutates — the "external payroll system"
+/// projection. Writing this and flipping the event to SUCCEEDED happen in one
+/// transaction, so a crash between the two is impossible and a redelivered job
+/// is a no-op.
+model EmployeePayrollProfile {
+  employeeId String @id
+
+  iban String?
+
+  street     String?
+  city       String?
+  postalCode String?
+  country    String?
+
+  salaryAmount   Decimal? @db.Decimal(12, 2)
+  salaryCurrency String?
+
+  /// Guards against applying an event twice, and against applying an event
+  /// that an already-applied later event supersedes.
+  lastAppliedSequence Int?
+  lastAppliedEventId  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
