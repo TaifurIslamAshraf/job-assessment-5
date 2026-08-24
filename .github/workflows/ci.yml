@@ -83,11 +83,13 @@ jobs:
       - name: Apply migrations
         run: pnpm --filter api db:deploy
 
+      # Run through turbo, not `pnpm --filter api`: the `test` tasks declare
+      # `db:generate` as a dependency, and calling jest directly skips it.
       - name: Unit tests
-        run: pnpm --filter api test
+        run: pnpm test
 
       - name: Integration / e2e tests
-        run: pnpm --filter api test:e2e
+        run: pnpm test:e2e
         env:
           # Deterministic provider: retry behaviour is exercised by tests that
           # inject failures explicitly, not by chance.
