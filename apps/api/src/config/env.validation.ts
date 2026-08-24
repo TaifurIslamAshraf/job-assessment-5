@@ -2,11 +2,18 @@ import { plainToInstance, Transform } from "class-transformer";
 import {
   IsEnum,
   IsInt,
+  IsOptional,
   IsString,
   Max,
   Min,
   validateSync,
 } from "class-validator";
+
+/** Keeps an unset optional variable undefined instead of turning it into NaN. */
+const optionalNumber = ({ value }: { value: unknown }): number | undefined =>
+  value === undefined || value === null || value === ""
+    ? undefined
+    : Number(value);
 
 export enum NodeEnv {
   Development = "development",
@@ -14,10 +21,6 @@ export enum NodeEnv {
   Production = "production",
 }
 
-/**
- * Fail fast on a misconfigured environment: a missing DATABASE_URL should stop
- * the process at boot, not surface as a confusing error on the first request.
- */
 export class EnvConfig {
   @IsEnum(NodeEnv)
   NODE_ENV: NodeEnv = NodeEnv.Development;
@@ -46,14 +49,21 @@ export class EnvConfig {
   @Min(1)
   MAX_ATTEMPTS: number = 5;
 
-  /**
-   * Probability the simulated payroll provider throws a transient error.
-   * Set to 0 in tests for deterministic behavior.
-   */
+  @Transform(({ value }) => Number(value))
+  @IsInt()
+  @Min(1_000)
+  STALE_CLAIM_MS: number = 2 * 60 * 1000;
+
   @Transform(({ value }) => Number(value))
   @Min(0)
   @Max(1)
   PAYROLL_FAILURE_RATE: number = 0.25;
+
+  @Transform(optionalNumber)
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  PAYROLL_LATENCY_MS?: number;
 
   @IsString()
   LOG_LEVEL: string = "info";

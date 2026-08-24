@@ -26,7 +26,9 @@ export class PayrollProviderService {
     eventId: string,
     idempotencyKey: string,
   ): Promise<ProviderResult> {
-    const latencyMs = 200 + Math.floor(Math.random() * 800);
+    const latencyMs =
+      this.config.get<number>("PAYROLL_LATENCY_MS") ??
+      200 + Math.floor(Math.random() * 800);
     await new Promise((resolve) => setTimeout(resolve, latencyMs));
 
     const failureRate = this.config.get<number>("PAYROLL_FAILURE_RATE") ?? 0;

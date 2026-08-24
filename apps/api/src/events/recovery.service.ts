@@ -1,12 +1,10 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { Cron, CronExpression } from "@nestjs/schedule";
 
 import { PayrollEventStatus } from "../generated/prisma/enums";
 import { PrismaService } from "../prisma/prisma.service";
 import { PayrollQueueService } from "../queue/payroll-queue.service";
-
-/** A claim older than this is assumed to belong to a worker that died. */
-const STALE_CLAIM_MS = 2 * 60 * 1000;
 
 /**
  * Requirement 7: a worker that is SIGKILLed mid-event leaves the row in
@@ -23,6 +21,7 @@ export class RecoveryService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly queue: PayrollQueueService,
+    private readonly config: ConfigService,
   ) {}
 
   @Cron(CronExpression.EVERY_30_SECONDS)
@@ -39,7 +38,8 @@ export class RecoveryService {
 
   /** PROCESSING rows whose worker never came back. */
   async recoverStuckEvents(): Promise<number> {
-    const cutoff = new Date(Date.now() - STALE_CLAIM_MS);
+    const staleClaimMs = this.config.get<number>("STALE_CLAIM_MS") ?? 120_000;
+    const cutoff = new Date(Date.now() - staleClaimMs);
 
     const stuck = await this.prisma.payrollEvent.findMany({
       where: {

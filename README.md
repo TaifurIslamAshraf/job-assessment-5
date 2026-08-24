@@ -124,17 +124,19 @@ Defined and validated in [`src/config/env.validation.ts`](apps/api/src/config/en
 The process refuses to boot on an invalid value rather than failing on the
 first request.
 
-| Variable               | Default                     | Purpose                                         |
-| ---------------------- | --------------------------- | ----------------------------------------------- |
-| `NODE_ENV`             | `development`               | Switches log format (pretty vs JSON).           |
-| `DATABASE_URL`         | —                           | Postgres connection string. **Required.**       |
-| `REDIS_URL`            | —                           | Redis connection string. **Required.**          |
-| `PORT`                 | `3001`                      | API listen port.                                |
-| `WORKER_CONCURRENCY`   | `5`                         | Jobs one worker handles in parallel.            |
-| `MAX_ATTEMPTS`         | `5`                         | Attempts before an event is permanently FAILED. |
-| `PAYROLL_FAILURE_RATE` | `0.25`                      | Chance the simulated provider fails (0–1).      |
-| `LOG_LEVEL`            | `info`                      | pino level.                                     |
-| `NEXT_PUBLIC_API_URL`  | `http://localhost:3001/api` | Baked into the frontend bundle at build time.   |
+| Variable               | Default                     | Purpose                                                             |
+| ---------------------- | --------------------------- | ------------------------------------------------------------------- |
+| `NODE_ENV`             | `development`               | Switches log format (pretty vs JSON).                               |
+| `DATABASE_URL`         | —                           | Postgres connection string. **Required.**                           |
+| `REDIS_URL`            | —                           | Redis connection string. **Required.**                              |
+| `PORT`                 | `3001`                      | API listen port.                                                    |
+| `WORKER_CONCURRENCY`   | `5`                         | Jobs one worker handles in parallel.                                |
+| `MAX_ATTEMPTS`         | `5`                         | Attempts before an event is permanently FAILED.                     |
+| `STALE_CLAIM_MS`       | `120000`                    | How long a `PROCESSING` claim may sit before the sweep reclaims it. |
+| `PAYROLL_FAILURE_RATE` | `0.25`                      | Chance the simulated provider fails (0–1).                          |
+| `PAYROLL_LATENCY_MS`   | —                           | Pins provider latency instead of a random 200–1000ms.               |
+| `LOG_LEVEL`            | `info`                      | pino level.                                                         |
+| `NEXT_PUBLIC_API_URL`  | `http://localhost:3001/api` | Baked into the frontend bundle at build time.                       |
 
 Raise `PAYROLL_FAILURE_RATE` to make retries and dead-lettering easy to
 demonstrate; the test suite pins it to `0` and injects failures explicitly.
@@ -252,6 +254,44 @@ sweeps every 30 seconds and:
    that opens if the process dies between `COMMIT` and `queue.add`.
 
 The sweeper runs only in the worker process.
+
+#### Demonstrating it
+
+```bash
+./scripts/demo-crash.sh
+```
+
+It boots the stack with two workers, submits an event, waits until a worker has
+actually claimed it, then `SIGKILL`s **that specific container** — `lockedBy` is
+`<hostname>#<pid>` and a container's hostname is its short id, so the script
+kills the worker holding the claim rather than guessing. It lowers
+`STALE_CLAIM_MS` to 10s and pins `PAYROLL_LATENCY_MS` to 8s so there is a wide
+window to kill into and a short wait afterwards.
+
+```
+▸ SIGKILL the worker holding the claim
+c40126d22dcb
+
+▸ The row is now claimed by a worker that no longer exists
+  status=PROCESSING  lockedBy=c40126d22dcb#1  attempts=1
+
+▸ Outcome
+  SUCCEEDED after 2 attempt(s)
+
+  —             → ACCEPTED      Event accepted and queued for processing
+  ACCEPTED      → PROCESSING    Processing started by c40126d22dcb#1
+  PROCESSING    → PENDING_RETRY Recovered from lost worker
+  PENDING_RETRY → PROCESSING    Processing started by 888ed525e954#1
+  PROCESSING    → SUCCEEDED     Applied via PP-C961ABA81CEB
+
+  applied: 72000 EUR (event seq 34)
+```
+
+The second `PROCESSING` names a **different container** — the surviving worker
+picked up what the dead one dropped. Recovery takes roughly 30–40 seconds
+because two independent mechanisms have to fire: this sweep resets the row, and
+BullMQ's own stalled-job detection releases the job the dead worker still holds
+a lock on. Neither alone is enough, which is why both exist.
 
 ### Extensibility (#10)
 
