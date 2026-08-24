@@ -7,7 +7,11 @@ import { hostname } from "node:os";
 import { Prisma } from "../generated/prisma/client";
 import { PayrollEventStatus } from "../generated/prisma/enums";
 import { PayrollProviderService } from "../payroll/payroll-provider.service";
-import { isPermanent, PermanentPayrollError } from "../payroll/payroll.errors";
+import {
+  isPermanent,
+  PermanentPayrollError,
+  RETRIES_EXHAUSTED,
+} from "../payroll/payroll.errors";
 import { PrismaService } from "../prisma/prisma.service";
 import { PAYROLL_QUEUE, PayrollJobData } from "../queue/queue.constants";
 import { HandlerRegistry } from "./handlers/handler.registry";
@@ -228,7 +232,7 @@ export class PayrollProcessor extends WorkerHost {
     const exhausted = attempt >= maxAttempts;
 
     if (permanent || exhausted) {
-      const code = permanent ? (err.code ?? "PERMANENT") : "RETRIES_EXHAUSTED";
+      const code = permanent ? (err.code ?? "PERMANENT") : RETRIES_EXHAUSTED;
       const reason = permanent
         ? err.message
         : `Giving up after ${attempt} attempts. Last error: ${err.message}`;

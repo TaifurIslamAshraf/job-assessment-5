@@ -2,6 +2,7 @@ import { BullModule } from "@nestjs/bullmq";
 import { Module } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
 
+import { PayrollQueueService } from "./payroll-queue.service";
 import { PAYROLL_QUEUE } from "./queue.constants";
 
 @Module({
@@ -32,6 +33,7 @@ import { PAYROLL_QUEUE } from "./queue.constants";
       }),
     }),
   ],
-  exports: [BullModule],
+  providers: [PayrollQueueService],
+  exports: [BullModule, PayrollQueueService],
 })
 export class QueueModule {}

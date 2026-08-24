@@ -42,6 +42,13 @@ export interface Transition {
   createdAt: string;
 }
 
+export interface RetryResponse {
+  id: string;
+  status: EventStatus;
+  attempts: number;
+  maxAttempts: number;
+}
+
 export interface SubmitResponse {
   id: string;
   status: EventStatus;
@@ -83,6 +90,11 @@ export const api = {
 
   get: (id: string) =>
     request<PayrollEvent & { transitions: Transition[] }>(`/events/${id}`),
+
+  retry: (id: string, force = false) =>
+    request<RetryResponse>(`/events/${id}/retry${force ? "?force=true" : ""}`, {
+      method: "POST",
+    }),
 
   health: () =>
     request<{ status: string; checks: Record<string, { status: string }> }>(

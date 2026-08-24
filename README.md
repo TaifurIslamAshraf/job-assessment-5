@@ -287,12 +287,24 @@ curl -X POST http://localhost:3001/api/events \
 # Status, result and audit trail
 curl http://localhost:3001/api/events/<id>
 
+# Retry a FAILED event
+curl -X POST http://localhost:3001/api/events/<id>/retry
+# → 202 when the event dead-lettered after transient failures
+# → 409 when it failed permanently; add ?force=true to retry it anyway
+
 # Health
 curl http://localhost:3001/api/health
 ```
 
 Demo a permanent failure with `"newSalary": 2000000` (above the approval
 limit), and an invalid request with `"currency": "XYZ"`.
+
+Retry moves the event back to `PENDING_RETRY` and re-enqueues it. Two details
+matter: `attempts` is never reset (it records total effort, so `maxAttempts` is
+raised instead), and the finished BullMQ job is cleared first — an `add` for a
+`jobId` still sitting in the completed set is silently ignored, which would make
+the retry a no-op. The status guard on the update means two operators clicking
+retry at once produce one re-run, not two.
 
 ---
 
@@ -308,6 +320,7 @@ pnpm --filter api test:e2e    # functional + e2e — needs Postgres and Redis
 | **Unit**       | `src/**/*.spec.ts`            | Handler business rules; idempotency-key derivation; per-type payload validation. Prisma and BullMQ are doubles, so these are fast and deterministic.                                                                                                               |
 | **Functional** | `test/events.e2e-spec.ts`     | The HTTP contract against real Postgres and Redis, with **no worker running** — which is what proves submission does not process inline. Validation, 202 vs 200, concurrent deduplication, 404/400.                                                                |
 | **End-to-end** | `test/processing.e2e-spec.ts` | API + worker + both datastores in one process. Successful processing, result persistence, transient retry then success, permanent failure without retry, dead-lettering, duplicate applied once, redelivery no-op, per-employee ordering, crashed-worker recovery. |
+| **End-to-end** | `test/retry.e2e-spec.ts`      | Operator retry: a dead-lettered event re-runs and applies, the audit trail records the manual step, a permanent failure is refused without `force`, and two simultaneous retries apply the change once.                                                            |
 
 The provider is stubbed per test rather than left random — a randomly failing
 dependency makes for a flaky suite, and each failure mode deserves its own

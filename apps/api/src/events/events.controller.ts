@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  ParseBoolPipe,
   ParseEnumPipe,
   ParseIntPipe,
   ParseUUIDPipe,
@@ -14,6 +15,7 @@ import {
   Res,
 } from "@nestjs/common";
 import {
+  ApiConflictResponse,
   ApiCreatedResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
@@ -95,5 +97,33 @@ export class EventsController {
   @ApiNotFoundResponse({ description: "No event with that id." })
   async findOne(@Param("id", ParseUUIDPipe) id: string) {
     return this.events.findOne(id);
+  }
+
+  @Post(":id/retry")
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({
+    summary: "Re-queue a failed event",
+    description:
+      "Moves a FAILED event back to PENDING_RETRY with a fresh attempt budget " +
+      "and re-enqueues it. A permanent failure is refused unless force=true, " +
+      "because it will be rejected the same way again.",
+  })
+  @ApiQuery({ name: "force", required: false, type: Boolean })
+  @ApiNotFoundResponse({ description: "No event with that id." })
+  @ApiConflictResponse({
+    description: "Event is not FAILED, or failed permanently without force.",
+  })
+  async retry(
+    @Param("id", ParseUUIDPipe) id: string,
+    @Query("force", new DefaultValuePipe(false), ParseBoolPipe) force: boolean,
+  ) {
+    const event = await this.events.retry(id, force);
+
+    return {
+      id: event.id,
+      status: event.status,
+      attempts: event.attempts,
+      maxAttempts: event.maxAttempts,
+    };
   }
 }

@@ -1,20 +1,9 @@
-import { InjectQueue } from "@nestjs/bullmq";
 import { Injectable, Logger } from "@nestjs/common";
 import { Cron, CronExpression } from "@nestjs/schedule";
-import { Queue } from "bullmq";
 
 import { PayrollEventStatus } from "../generated/prisma/enums";
 import { PrismaService } from "../prisma/prisma.service";
-import { PAYROLL_QUEUE, PayrollJobData } from "../queue/queue.constants";
-
-/** Job states that mean a job really is still queued for this event. */
-const PENDING_JOB_STATES = new Set([
-  "waiting",
-  "waiting-children",
-  "active",
-  "delayed",
-  "prioritized",
-]);
+import { PayrollQueueService } from "../queue/payroll-queue.service";
 
 /** A claim older than this is assumed to belong to a worker that died. */
 const STALE_CLAIM_MS = 2 * 60 * 1000;
@@ -33,7 +22,7 @@ export class RecoveryService {
 
   constructor(
     private readonly prisma: PrismaService,
-    @InjectQueue(PAYROLL_QUEUE) private readonly queue: Queue<PayrollJobData>,
+    private readonly queue: PayrollQueueService,
   ) {}
 
   @Cron(CronExpression.EVERY_30_SECONDS)
@@ -90,7 +79,7 @@ export class RecoveryService {
       this.logger.warn(
         `Recovered stuck event ${event.id} from lost worker ${event.lockedBy}`,
       );
-      await this.enqueue(event.id, event.employeeId);
+      await this.queue.reenqueue("recovery", event.id, event.employeeId);
     }
 
     return stuck.length;
@@ -111,38 +100,13 @@ export class RecoveryService {
 
     let requeued = 0;
     for (const event of candidates) {
-      const job = await this.queue.getJob(event.id);
-      // A job in a finished set does not count as backing the row — the row is
-      // ready to run, so a completed/failed job means the two have diverged.
-      if (job && PENDING_JOB_STATES.has(await job.getState())) continue;
+      if (await this.queue.hasPendingJob(event.id)) continue;
 
-      await this.enqueue(event.id, event.employeeId);
+      await this.queue.reenqueue("recovery", event.id, event.employeeId);
       requeued += 1;
       this.logger.warn(`Re-enqueued orphaned event ${event.id}`);
     }
 
     return requeued;
-  }
-
-  /**
-   * `jobId` is the event id, which is what makes enqueueing idempotent — but
-   * BullMQ *silently ignores* an add whose jobId already exists, including one
-   * sitting in the completed set from a previous run. Recovery must therefore
-   * clear the old job first, or the re-enqueue is a no-op and the event stays
-   * stuck forever.
-   */
-  private async enqueue(eventId: string, employeeId: string): Promise<void> {
-    const existing = await this.queue.getJob(eventId);
-    if (existing) {
-      // Throws if the job is currently active; that worker owns it, so leaving
-      // it alone is correct.
-      await existing.remove().catch(() => undefined);
-    }
-
-    await this.queue.add(
-      "recovery",
-      { eventId, employeeId },
-      { jobId: eventId },
-    );
   }
 }

@@ -1,10 +1,10 @@
 import { BadRequestException } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { Test } from "@nestjs/testing";
-import { getQueueToken } from "@nestjs/bullmq";
 
 import { PayrollEventType } from "../generated/prisma/enums";
 import { PrismaService } from "../prisma/prisma.service";
-import { PAYROLL_QUEUE } from "../queue/queue.constants";
+import { PayrollQueueService } from "../queue/payroll-queue.service";
 import { CreateEventDto } from "./dto/create-event.dto";
 import { EventsService } from "./events.service";
 
@@ -20,7 +20,7 @@ describe("EventsService", () => {
     payrollEventTransition: { create: jest.Mock };
     $transaction: jest.Mock;
   };
-  let queue: { add: jest.Mock };
+  let queue: { enqueue: jest.Mock };
 
   beforeEach(async () => {
     prisma = {
@@ -28,13 +28,14 @@ describe("EventsService", () => {
       payrollEventTransition: { create: jest.fn() },
       $transaction: jest.fn(),
     };
-    queue = { add: jest.fn().mockResolvedValue(undefined) };
+    queue = { enqueue: jest.fn().mockResolvedValue(undefined) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
         EventsService,
         { provide: PrismaService, useValue: prisma },
-        { provide: getQueueToken(PAYROLL_QUEUE), useValue: queue },
+        { provide: PayrollQueueService, useValue: queue },
+        { provide: ConfigService, useValue: { get: () => 5 } },
       ],
     }).compile();
 
@@ -140,7 +141,7 @@ describe("EventsService", () => {
     });
   });
 
-  it("enqueues with the event id as job id so redelivery cannot duplicate", async () => {
+  it("enqueues the accepted event by id", async () => {
     prisma.payrollEvent.findUnique.mockResolvedValue(null);
     prisma.$transaction.mockResolvedValue({
       id: "evt-42",
@@ -151,10 +152,10 @@ describe("EventsService", () => {
 
     await service.submit(dto());
 
-    expect(queue.add).toHaveBeenCalledWith(
+    expect(queue.enqueue).toHaveBeenCalledWith(
       "SALARY_CHANGE",
-      { eventId: "evt-42", employeeId: "emp-1001" },
-      { jobId: "evt-42" },
+      "evt-42",
+      "emp-1001",
     );
   });
 });

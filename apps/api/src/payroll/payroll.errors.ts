@@ -25,6 +25,13 @@ export class PermanentPayrollError extends Error {
   }
 }
 
+/**
+ * Failure code written when a transient error ran out of attempts, as opposed
+ * to a permanent rejection. It is the only signal that says a retry could
+ * plausibly succeed.
+ */
+export const RETRIES_EXHAUSTED = "RETRIES_EXHAUSTED";
+
 export function isPermanent(error: unknown): error is PermanentPayrollError {
   return error instanceof PermanentPayrollError;
 }

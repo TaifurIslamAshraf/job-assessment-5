@@ -1,11 +1,11 @@
-import { InjectQueue } from "@nestjs/bullmq";
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
 } from "@nestjs/common";
-import { Queue } from "bullmq";
+import { ConfigService } from "@nestjs/config";
 import { ClassConstructor, plainToInstance } from "class-transformer";
 import { validateSync } from "class-validator";
 import { createHash } from "node:crypto";
@@ -15,8 +15,9 @@ import {
   PayrollEventStatus,
   PayrollEventType,
 } from "../generated/prisma/enums";
+import { RETRIES_EXHAUSTED } from "../payroll/payroll.errors";
 import { PrismaService } from "../prisma/prisma.service";
-import { PAYROLL_QUEUE, PayrollJobData } from "../queue/queue.constants";
+import { PayrollQueueService } from "../queue/payroll-queue.service";
 import { CreateEventDto } from "./dto/create-event.dto";
 import { PAYLOAD_SCHEMAS } from "./dto/payloads";
 
@@ -32,7 +33,8 @@ export class EventsService {
 
   constructor(
     private readonly prisma: PrismaService,
-    @InjectQueue(PAYROLL_QUEUE) private readonly queue: Queue<PayrollJobData>,
+    private readonly queue: PayrollQueueService,
+    private readonly config: ConfigService,
   ) {}
 
   async submit(dto: CreateEventDto): Promise<SubmitResult> {
@@ -139,15 +141,85 @@ export class EventsService {
   }
 
   /**
+   * Operator action on a dead-lettered event: put it back on the queue with a
+   * fresh attempt budget.
+   */
+  async retry(id: string, force: boolean): Promise<PayrollEvent> {
+    const event = await this.prisma.payrollEvent.findUnique({ where: { id } });
+
+    if (!event) {
+      throw new NotFoundException(`Payroll event ${id} not found`);
+    }
+
+    if (event.status !== PayrollEventStatus.FAILED) {
+      throw new ConflictException(
+        `Event ${id} is ${event.status}; only a FAILED event can be retried`,
+      );
+    }
+
+    // A permanent failure will be rejected the same way again, so retrying it
+    // has to be a deliberate choice rather than the default.
+    if (!force && event.failureCode !== RETRIES_EXHAUSTED) {
+      throw new ConflictException(
+        `Event ${id} failed permanently (${event.failureCode}); retrying will not help. Pass force=true to retry anyway.`,
+      );
+    }
+
+    // `attempts` counts total effort and is never reset, so the budget has to
+    // be raised instead — otherwise the event is exhausted on arrival.
+    const maxAttempts =
+      event.attempts + (this.config.get<number>("MAX_ATTEMPTS") ?? 5);
+
+    const claimed = await this.prisma.payrollEvent.updateMany({
+      where: { id, status: PayrollEventStatus.FAILED },
+      data: {
+        status: PayrollEventStatus.PENDING_RETRY,
+        maxAttempts,
+        failureCode: null,
+        failureReason: null,
+        completedAt: null,
+        lockedBy: null,
+        lockedAt: null,
+      },
+    });
+
+    // Two operators clicking retry at once: only the first moves the row, and
+    // the loser must not enqueue a second job.
+    if (claimed.count === 0) {
+      throw new ConflictException(`Event ${id} is already being retried`);
+    }
+
+    await this.prisma.payrollEventTransition.create({
+      data: {
+        eventId: id,
+        fromStatus: PayrollEventStatus.FAILED,
+        toStatus: PayrollEventStatus.PENDING_RETRY,
+        attempt: event.attempts,
+        message: "Manual retry requested",
+        metadata: {
+          force,
+          previousFailureCode: event.failureCode,
+        } as Prisma.InputJsonObject,
+      },
+    });
+
+    await this.queue.reenqueue("retry", id, event.employeeId, {
+      attempts: maxAttempts,
+    });
+
+    this.logger.log(
+      `Manual retry queued for event ${id} (attempts ${event.attempts}/${maxAttempts}, force=${force})`,
+    );
+
+    return this.prisma.payrollEvent.findUniqueOrThrow({ where: { id } });
+  }
+
+  /**
    * The job id is the event id, which makes enqueueing idempotent: a duplicate
    * submission or a replayed request cannot produce two jobs for one event.
    */
   private async enqueue(event: PayrollEvent): Promise<void> {
-    await this.queue.add(
-      event.type,
-      { eventId: event.id, employeeId: event.employeeId },
-      { jobId: event.id },
-    );
+    await this.queue.enqueue(event.type, event.id, event.employeeId);
   }
 
   /**

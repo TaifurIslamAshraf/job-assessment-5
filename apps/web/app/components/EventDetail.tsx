@@ -13,6 +13,12 @@ type Detail = PayrollEvent & { transitions: Transition[] };
 export function EventDetail({ id }: { id: string }) {
   const [event, setEvent] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [reload, setReload] = useState(0);
+
+  useEffect(() => {
+    setEvent(null);
+  }, [id]);
 
   useEffect(() => {
     let active = true;
@@ -32,17 +38,35 @@ export function EventDetail({ id }: { id: string }) {
       }
     }
 
-    setEvent(null);
     void poll();
 
     return () => {
       active = false;
       clearTimeout(timer);
     };
-  }, [id]);
+  }, [id, reload]);
 
-  if (error) return <div className="panel alert err">{error}</div>;
-  if (!event) return <div className="panel muted">Loading…</div>;
+  async function retry(force: boolean) {
+    setRetrying(true);
+    try {
+      await api.retry(id, force);
+      setError(null);
+      // The event is moving again, so restart the poll the effect stopped.
+      setReload((n) => n + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  if (!event) {
+    return error ? (
+      <div className="panel alert err">{error}</div>
+    ) : (
+      <div className="panel muted">Loading…</div>
+    );
+  }
 
   return (
     <div className="panel">
@@ -76,11 +100,38 @@ export function EventDetail({ id }: { id: string }) {
         )}
       </dl>
 
+      {error && <div className="alert err">{error}</div>}
+
       {event.failureReason && (
         <div className="alert err">
           <strong>{event.failureCode}</strong>
           <br />
           {event.failureReason}
+        </div>
+      )}
+
+      {event.status === "FAILED" && (
+        <div className="row">
+          <button
+            type="button"
+            style={{ width: "auto", padding: "5px 10px" }}
+            disabled={retrying}
+            onClick={() => void retry(false)}
+          >
+            {retrying ? "Retrying…" : "Retry"}
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            disabled={retrying}
+            onClick={() => void retry(true)}
+          >
+            Force retry
+          </button>
+          <span className="muted">
+            Force is for a permanent failure — it will fail the same way unless
+            the cause was fixed.
+          </span>
         </div>
       )}
 
