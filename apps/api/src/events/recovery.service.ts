@@ -49,6 +49,7 @@ export class RecoveryService {
       select: { id: true, employeeId: true, attempts: true, lockedBy: true },
     });
 
+    let recovered = 0;
     for (const event of stuck) {
       // Guarded by status so a worker that wakes up and finishes normally in
       // the meantime is not clobbered.
@@ -63,7 +64,10 @@ export class RecoveryService {
         },
       });
 
+      // Another worker's sweep got there first. Every worker runs this, so a
+      // lost race is the normal case, not an error.
       if (released.count === 0) continue;
+      recovered += 1;
 
       await this.prisma.payrollEventTransition.create({
         data: {
@@ -82,7 +86,7 @@ export class RecoveryService {
       await this.queue.reenqueue("recovery", event.id, event.employeeId);
     }
 
-    return stuck.length;
+    return recovered;
   }
 
   /** Rows that are ready to run but have no job in Redis backing them. */

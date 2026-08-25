@@ -415,9 +415,9 @@ parallel suites would interfere with each other's queue state.
   `node_modules` only resolves inside the workspace root. `pnpm deploy` would
   produce a smaller image; I chose the predictable option over the small one.
 
-- **The recovery sweep is a fixed 30s cron with a 2-minute staleness window.**
-  Both should be config, and at scale the sweep should be leader-elected rather
-  than run by every worker — currently N workers do N redundant scans.
+- **The recovery sweep is a fixed 30s cron.** The staleness window is now
+  `STALE_CLAIM_MS`; the interval itself is still hardcoded because `@Cron` takes
+  a static expression and making it dynamic means managing the schedule by hand.
 
 - **`payload` as JSONB** trades database-level shape enforcement for
   extensibility. Justified above; the mitigation is strict boundary validation.
@@ -425,6 +425,58 @@ parallel suites would interfere with each other's queue state.
 - **No authentication.** Explicitly out of scope. In production `POST /events`
   would be service-to-service authenticated, and `employeeId` would be
   authorization-checked rather than trusted from the body.
+
+---
+
+## Decisions I was on the fence about
+
+Three things are deliberate rather than accidental, and each has a real argument
+on the other side.
+
+### A failed event does not block later events for the same employee
+
+The blocker check counts only `ACCEPTED`, `PROCESSING` and `PENDING_RETRY`, so a
+dead-lettered address change does not freeze that employee's payroll.
+
+This is safe **because every payload carries an absolute value, not a delta**,
+and the three event types write disjoint columns. A rejected salary change
+cannot make a later one wrong — the later one states the salary outright. If a
+`BONUS_PAYMENT` that accumulated, or a percentage raise, were added, this
+reasoning collapses and a failed predecessor would have to block.
+
+The interesting case is retrying a failure _after_ a later event has already
+landed. The `lastAppliedSequence` guard correctly refuses to overwrite the newer
+value — but it used to still record `Applied via …`, which is a lie in the audit
+trail. A superseded replay now finishes `SUCCEEDED` with
+`result: { applied: false, supersededBy: <sequence> }` and says so in its
+transition, so "nothing changed" is visible instead of silent.
+
+### The row owns the attempt budget, not BullMQ
+
+`attempts` on the row counts _total effort_ and is never reset — a manual retry
+raises `maxAttempts` instead. That deliberately diverges from BullMQ's own
+counter, which restarts whenever recovery re-enqueues an event as a new job.
+
+Two counters that disagree need one of them to be authoritative, and it has to
+be the row: it is the only one that survives a re-enqueue, and it is what the
+API and UI display. `handleFailure` therefore reads `event.maxAttempts` rather
+than `job.opts.attempts`. BullMQ is the retry _transport_; Postgres decides when
+to give up.
+
+### Every worker runs the recovery sweep
+
+Three workers means three scans every 30 seconds racing on the same rows. The
+`updateMany` status guard makes that correct — exactly one worker wins each row
+— so this is waste, not a bug, and the sweep is two indexed queries.
+
+I looked at fixing it and chose not to. A Postgres advisory lock is the obvious
+tool, but session-scoped locks and a connection pool are a bad combination: the
+unlock can land on a different pooled connection than the lock, leaking it. The
+transaction-scoped variant releases correctly but would wrap Redis calls in a
+database transaction. A lease table works and needs a migration. None of that is
+worth it while the sweep costs two queries — but the sweep now reports how many
+rows it _actually_ reclaimed rather than how many it looked at, so the logs stay
+honest when workers race.
 
 ---
 

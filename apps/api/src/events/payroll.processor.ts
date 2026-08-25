@@ -1,6 +1,5 @@
 import { OnWorkerEvent, Processor, WorkerHost } from "@nestjs/bullmq";
 import { Logger } from "@nestjs/common";
-import { ConfigService } from "@nestjs/config";
 import { DelayedError, Job } from "bullmq";
 import { hostname } from "node:os";
 
@@ -31,7 +30,6 @@ export class PayrollProcessor extends WorkerHost {
     private readonly prisma: PrismaService,
     private readonly handlers: HandlerRegistry,
     private readonly provider: PayrollProviderService,
-    private readonly config: ConfigService,
   ) {
     super();
   }
@@ -148,6 +146,7 @@ export class PayrollProcessor extends WorkerHost {
       const result = await this.provider.submit(event.id, event.idempotencyKey);
 
       const mutation = handler.apply(ctx);
+      let superseded: number | null = null;
 
       await this.prisma.$transaction(async (tx) => {
         // Requirement 8 again: the guard makes the write itself idempotent even
@@ -156,12 +155,15 @@ export class PayrollProcessor extends WorkerHost {
           where: { employeeId: event.employeeId },
         });
 
-        if (
+        superseded =
           profile?.lastAppliedSequence != null &&
           profile.lastAppliedSequence >= event.sequence
-        ) {
+            ? profile.lastAppliedSequence
+            : null;
+
+        if (superseded !== null) {
           this.logger.warn(
-            `Event ${eventId} (seq ${event.sequence}) superseded by seq ${profile.lastAppliedSequence}; not re-applying`,
+            `Event ${eventId} (seq ${event.sequence}) superseded by seq ${superseded}; not re-applying`,
           );
         } else {
           await tx.employeePayrollProfile.upsert({
@@ -184,7 +186,10 @@ export class PayrollProcessor extends WorkerHost {
           where: { id: eventId },
           data: {
             status: PayrollEventStatus.SUCCEEDED,
-            result: { ...result },
+            result:
+              superseded === null
+                ? { ...result }
+                : { ...result, applied: false, supersededBy: superseded },
             completedAt: new Date(),
             lockedBy: null,
             lockedAt: null,
@@ -199,7 +204,10 @@ export class PayrollProcessor extends WorkerHost {
             fromStatus: PayrollEventStatus.PROCESSING,
             toStatus: PayrollEventStatus.SUCCEEDED,
             attempt,
-            message: `Applied via ${result.providerReference}`,
+            message:
+              superseded === null
+                ? `Applied via ${result.providerReference}`
+                : `Provider accepted ${result.providerReference}, but sequence ${superseded} already superseded this change`,
             metadata: { ...result },
           },
         });
@@ -210,7 +218,7 @@ export class PayrollProcessor extends WorkerHost {
       );
       return result;
     } catch (error) {
-      return this.handleFailure(eventId, attempt, job, error);
+      return this.handleFailure(eventId, attempt, event.maxAttempts, error);
     }
   }
 
@@ -222,12 +230,10 @@ export class PayrollProcessor extends WorkerHost {
   private async handleFailure(
     eventId: string,
     attempt: number,
-    job: Job<PayrollJobData>,
+    maxAttempts: number,
     error: unknown,
   ): Promise<never | unknown> {
     const err = error as Error & { code?: string };
-    const maxAttempts =
-      job.opts.attempts ?? this.config.get<number>("MAX_ATTEMPTS") ?? 5;
     const permanent = isPermanent(error);
     const exhausted = attempt >= maxAttempts;
 
