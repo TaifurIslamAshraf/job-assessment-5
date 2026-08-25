@@ -25,10 +25,21 @@ export default function Page() {
     }
   }, []);
 
-  // Fetch once on mount; subsequent updates come from onSubmitted callbacks.
+  // Poll only while there are events still being processed. Stops
+  // automatically once every event reaches a terminal state.
+  const hasInProgress = events.some((e) =>
+    ["ACCEPTED", "PROCESSING", "PENDING_RETRY"].includes(e.status),
+  );
+
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!hasInProgress) return;
+    const timer = setInterval(() => void refresh(), 2000);
+    return () => clearInterval(timer);
+  }, [hasInProgress, refresh]);
 
   useEffect(() => {
     void api
