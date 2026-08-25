@@ -25,12 +25,9 @@ export default function Page() {
     }
   }, []);
 
-  // The list refreshes on a timer rather than on demand so status changes
-  // driven by the worker show up without touching the page.
+  // Fetch once on mount; subsequent updates come from onSubmitted callbacks.
   useEffect(() => {
     void refresh();
-    const timer = setInterval(() => void refresh(), 2000);
-    return () => clearInterval(timer);
   }, [refresh]);
 
   useEffect(() => {
