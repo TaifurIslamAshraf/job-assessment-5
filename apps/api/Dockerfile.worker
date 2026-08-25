@@ -1,0 +1,36 @@
+# Worker Dockerfile — identical to the API image but runs the worker process.
+# Build context is the repo root:
+#   docker build -f apps/api/Dockerfile.worker .
+
+FROM node:22-alpine AS base
+RUN corepack enable
+WORKDIR /app
+
+# ── deps ──────────────────────────────────────────────────────────────────
+FROM base AS deps
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY apps/api/package.json apps/api/
+COPY apps/web/package.json apps/web/
+COPY packages/eslint-config/package.json packages/eslint-config/
+COPY packages/typescript-config/package.json packages/typescript-config/
+COPY packages/ui/package.json packages/ui/
+RUN pnpm install --frozen-lockfile
+
+# ── build ─────────────────────────────────────────────────────────────────
+FROM deps AS build
+COPY . .
+RUN pnpm --filter api db:generate && pnpm --filter api build
+
+# ── runtime ───────────────────────────────────────────────────────────────
+FROM base AS runtime
+ENV NODE_ENV=production
+
+COPY --from=build /app /app
+
+WORKDIR /app/apps/api
+
+RUN addgroup -S nodejs && adduser -S nestjs -G nodejs && chown -R nestjs:nodejs /app
+USER nestjs
+
+# The only difference from Dockerfile: runs the worker instead of the API.
+CMD ["node", "dist/worker"]
