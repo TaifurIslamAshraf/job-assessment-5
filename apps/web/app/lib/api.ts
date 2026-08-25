@@ -1,5 +1,7 @@
-export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001/api";
+// Relative by default, so requests go to this app's own origin and are proxied
+// server-side by app/api/[...path]/route.ts. Set NEXT_PUBLIC_API_URL at build
+// time only if you want the browser to call the API directly instead.
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || "/api";
 
 export type EventStatus =
   | "ACCEPTED"

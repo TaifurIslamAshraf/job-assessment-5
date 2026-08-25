@@ -5,6 +5,7 @@ node_modules
 .pnp
 .pnp.js
 PLAN.md
+INTERVIEW.md
 # Local env files
 .env
 .env.local

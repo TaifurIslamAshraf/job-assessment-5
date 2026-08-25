@@ -12,6 +12,7 @@
     "STALE_CLAIM_MS",
     "PAYROLL_FAILURE_RATE",
     "PAYROLL_LATENCY_MS",
+    "API_ORIGIN",
     "NEXT_PUBLIC_API_URL"
   ],
   "tasks": {

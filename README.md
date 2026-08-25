@@ -85,19 +85,20 @@ Prisma, configured in
 Everything is validated at boot in
 [`src/config/env.validation.ts`](apps/api/src/config/env.validation.ts).
 
-| Variable               | Default                     | Purpose                                                             |
-| ---------------------- | --------------------------- | ------------------------------------------------------------------- |
-| `NODE_ENV`             | `development`               | Switches log format (pretty vs JSON).                               |
-| `DATABASE_URL`         | —                           | Postgres connection string. Required.                               |
-| `REDIS_URL`            | —                           | Redis connection string. Required.                                  |
-| `PORT`                 | `3001`                      | API listen port.                                                    |
-| `WORKER_CONCURRENCY`   | `5`                         | Jobs one worker handles in parallel.                                |
-| `MAX_ATTEMPTS`         | `5`                         | Attempts before an event is permanently FAILED.                     |
-| `STALE_CLAIM_MS`       | `120000`                    | How long a `PROCESSING` claim may sit before the sweep reclaims it. |
-| `PAYROLL_FAILURE_RATE` | `0.25`                      | Chance the simulated provider fails (0–1).                          |
-| `PAYROLL_LATENCY_MS`   | —                           | Pins provider latency instead of a random 200–1000ms.               |
-| `LOG_LEVEL`            | `info`                      | pino level.                                                         |
-| `NEXT_PUBLIC_API_URL`  | `http://localhost:3001/api` | Baked into the frontend bundle at build time.                       |
+| Variable               | Default                 | Purpose                                                             |
+| ---------------------- | ----------------------- | ------------------------------------------------------------------- |
+| `NODE_ENV`             | `development`           | Switches log format (pretty vs JSON).                               |
+| `DATABASE_URL`         | —                       | Postgres connection string. Required.                               |
+| `REDIS_URL`            | —                       | Redis connection string. Required.                                  |
+| `PORT`                 | `3001`                  | API listen port.                                                    |
+| `WORKER_CONCURRENCY`   | `5`                     | Jobs one worker handles in parallel.                                |
+| `MAX_ATTEMPTS`         | `5`                     | Attempts before an event is permanently FAILED.                     |
+| `STALE_CLAIM_MS`       | `120000`                | How long a `PROCESSING` claim may sit before the sweep reclaims it. |
+| `PAYROLL_FAILURE_RATE` | `0.25`                  | Chance the simulated provider fails (0–1).                          |
+| `PAYROLL_LATENCY_MS`   | —                       | Pins provider latency instead of a random 200–1000ms.               |
+| `LOG_LEVEL`            | `info`                  | pino level.                                                         |
+| `API_ORIGIN`           | `http://localhost:3001` | Where the frontend proxies `/api/*`. Read at runtime.               |
+| `NEXT_PUBLIC_API_URL`  | —                       | Optional build arg. Makes the browser call the API directly.        |
 
 Turn `PAYROLL_FAILURE_RATE` up if you want to see retries and dead-lettering
 without waiting for luck. The test suite pins it to `0` and injects failures

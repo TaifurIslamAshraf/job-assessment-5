@@ -113,12 +113,11 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
-      args:
-        NEXT_PUBLIC_API_URL: http://localhost:3001/api
     restart: unless-stopped
     environment:
       NODE_ENV: production
-      NEXT_PUBLIC_API_URL: http://localhost:3001/api
+      # Server-side proxy target. The browser never sees this address.
+      API_ORIGIN: http://api:3001
     ports:
       - "3000:3000"
     depends_on:

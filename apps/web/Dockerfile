@@ -15,9 +15,9 @@ COPY packages/ui/package.json packages/ui/
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS build
-# Baked into the client bundle at build time, so it must be present here and
-# not only at runtime.
-ARG NEXT_PUBLIC_API_URL=http://localhost:3001/api
+# Optional. Leave it unset and the frontend calls its own origin, which
+# app/api/[...path]/route.ts proxies to API_ORIGIN at runtime.
+ARG NEXT_PUBLIC_API_URL=
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 COPY . .
 RUN pnpm --filter web build
