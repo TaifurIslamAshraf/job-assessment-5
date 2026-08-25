@@ -1,90 +1,21 @@
 # Payroll Event Processing Service
 
-A backend service that accepts employee payroll change events over HTTP and
-processes them asynchronously through a Redis/BullMQ queue, with a minimal
-Next.js frontend for demonstrating the behavior.
+## Getting started
 
-The engineering problem here is not the payroll math — it is staying correct
-when the external system is slow and flaky, when clients retry, when multiple
-workers compete, and when a worker dies mid-flight.
+### Prerequisites
 
----
+Node 18 or newer, pnpm 9, and Docker with the compose plugin. The versions are
+pinned in the root `package.json` under `engines` and `packageManager`.
 
-## Architecture
-
-```
-                 ┌──────────────┐
-                 │   Frontend   │  Next.js · :3000
-                 │  (apps/web)  │  submit · list · inspect · poll
-                 └──────┬───────┘
-                        │ HTTP (JSON)
-                        ▼
-┌───────────────────────────────────────────────────────┐
-│                  API  ·  NestJS  :3001                │
-│                    (apps/api → main.ts)               │
-│                                                       │
-│  POST /api/events   validate → persist → enqueue → 202│
-│  GET  /api/events   list                              │
-│  GET  /api/events/:id   status + result + audit trail │
-│  POST /api/events/:id/retry   re-queue a failed event │
-│  GET  /api/employees/:id/profile   applied state      │
-│  GET  /api/health   Postgres + Redis probe            │
-└───────┬───────────────────────────────┬───────────────┘
-        │ write (source of truth)       │ enqueue (jobId = event.id)
-        ▼                               ▼
-┌───────────────────┐          ┌──────────────────┐
-│    PostgreSQL     │          │      Redis       │
-│                   │          │    (BullMQ)      │
-│ payroll_event     │◄────┐    │  payroll-events  │
-│ ..._transition    │     │    └────────┬─────────┘
-│ employee_profile  │     │             │ consume
-└───────────────────┘     │             ▼
-                          │   ┌────────────────────────────┐
-                          └───┤  Worker · NestJS standalone│
-                    read+write│    (apps/api → worker.ts)  │
-                              │                            │
-                              │  1 already finished? no-op │
-                              │  2 earlier event open?     │
-                              │      → delay, keep order   │
-                              │  3 claim (compare-and-set) │
-                              │  4 handler.validate()      │
-                              │  5 provider.submit()  ←── simulated,
-                              │  6 TX: apply + SUCCEEDED       slow, flaky
-                              │  7 recovery sweep (30s)    │
-                              └────────────────────────────┘
-```
-
-The API and the worker are **the same codebase with two entrypoints**
-(`src/main.ts`, `src/worker.ts`) sharing `CoreModule` and `EventsModule`. The
-API registers no BullMQ processor, so scaling the API never scales consumers,
-and background work never depends on an open HTTP request.
-
-### Event lifecycle
-
-```
-                    ┌──────────────────────────────┐
-   POST /events     │                              │
-        │           ▼                              │
-        └──────► ACCEPTED ──► PROCESSING ──► SUCCEEDED
-                    ▲             │
-                    │             ├──► PENDING_RETRY ──┘  (transient, backoff)
-                    │             │
-                    │             └──► FAILED             (permanent, or
-                    │                                      attempts exhausted)
-                    └── recovery sweep releases a stale
-                        PROCESSING claim from a dead worker
-```
-
----
-
-## Quick start
+### Everything in Docker
 
 ```bash
 git clone <repo> && cd job-assesment
-docker compose up --build
+docker compose up --build        # or: pnpm docker:up
 ```
 
-That starts Postgres, Redis, migrations, the API, a worker, and the frontend.
+That brings up Postgres, Redis, migrations, the API, one worker and the
+frontend. Nothing else to install.
 
 | Service  | URL                              |
 | -------- | -------------------------------- |
@@ -93,42 +24,72 @@ That starts Postgres, Redis, migrations, the API, a worker, and the frontend.
 | Swagger  | http://localhost:3001/api/docs   |
 | Health   | http://localhost:3001/api/health |
 
-The `migrate` service applies migrations and exits; `api` and `worker` both
-wait for it via `service_completed_successfully`, so neither ever starts
-against a schema that does not exist.
+The `migrate` service applies migrations and exits. Both `api` and `worker`
+wait on it with `service_completed_successfully`, so neither can start against
+a schema that isn't there yet.
 
-To exercise the multi-worker guarantees:
+To watch the multi-worker behaviour:
 
 ```bash
 docker compose up --scale worker=3
 ```
 
-### Local development (without Docker)
+Tear down with `docker compose down -v` (or `pnpm docker:down`). The `-v` drops
+the Postgres and Redis volumes too, so you get a clean slate next time.
+
+### Running it locally
+
+Infrastructure in Docker, application processes on the host. This is the loop I
+actually used while building it, because the API and worker restart in about a
+second instead of rebuilding an image.
 
 ```bash
 pnpm install
-docker compose up -d postgres redis     # just the infrastructure
-cp apps/api/.env.example apps/api/.env
 
-pnpm --filter api db:migrate            # create the schema
-pnpm --filter api dev                   # API   :3001
-pnpm --filter api dev:worker            # worker (separate terminal)
-pnpm --filter web dev                   # frontend :3000
+docker compose up -d postgres redis      # infrastructure only
+cp apps/api/.env.example apps/api/.env   # already points at localhost
+
+pnpm --filter api db:migrate             # create the schema, generate the client
 ```
+
+Then three terminals:
+
+```bash
+pnpm --filter api dev          # API      :3001
+pnpm --filter api dev:worker   # worker   (no HTTP server)
+pnpm --filter web dev          # frontend :3000
+```
+
+Running the worker as its own process is the point, not a convenience. Stop the
+API and queued events keep processing normally, which is the quickest way to
+convince yourself that submission and processing really are decoupled.
+
+### Database setup and migrations
+
+Prisma, configured in
+[`apps/api/prisma.config.ts`](apps/api/prisma.config.ts). The schema lives in
+`prisma/schema.prisma` and migrations in `prisma/migrations/`.
+
+| Command                         | What it does                                                             |
+| ------------------------------- | ------------------------------------------------------------------------ |
+| `pnpm db:migrate`               | Creates and applies a migration from schema changes, regenerates client. |
+| `pnpm db:deploy`                | Applies existing migrations only. Used by Docker and CI.                 |
+| `pnpm --filter api db:generate` | Regenerates the Prisma client without touching the database.             |
+| `pnpm --filter api db:reset`    | Drops everything and replays migrations from scratch.                    |
+| `pnpm db:studio`                | Opens Prisma Studio to poke at rows directly.                            |
 
 ---
 
 ## Environment variables
 
-Defined and validated in [`src/config/env.validation.ts`](apps/api/src/config/env.validation.ts).
-The process refuses to boot on an invalid value rather than failing on the
-first request.
+Everything is validated at boot in
+[`src/config/env.validation.ts`](apps/api/src/config/env.validation.ts).
 
 | Variable               | Default                     | Purpose                                                             |
 | ---------------------- | --------------------------- | ------------------------------------------------------------------- |
 | `NODE_ENV`             | `development`               | Switches log format (pretty vs JSON).                               |
-| `DATABASE_URL`         | —                           | Postgres connection string. **Required.**                           |
-| `REDIS_URL`            | —                           | Redis connection string. **Required.**                              |
+| `DATABASE_URL`         | —                           | Postgres connection string. Required.                               |
+| `REDIS_URL`            | —                           | Redis connection string. Required.                                  |
 | `PORT`                 | `3001`                      | API listen port.                                                    |
 | `WORKER_CONCURRENCY`   | `5`                         | Jobs one worker handles in parallel.                                |
 | `MAX_ATTEMPTS`         | `5`                         | Attempts before an event is permanently FAILED.                     |
@@ -138,227 +99,9 @@ first request.
 | `LOG_LEVEL`            | `info`                      | pino level.                                                         |
 | `NEXT_PUBLIC_API_URL`  | `http://localhost:3001/api` | Baked into the frontend bundle at build time.                       |
 
-Raise `PAYROLL_FAILURE_RATE` to make retries and dead-lettering easy to
-demonstrate; the test suite pins it to `0` and injects failures explicitly.
-
----
-
-## Database design
-
-Three tables, in [`prisma/schema.prisma`](apps/api/prisma/schema.prisma).
-
-**`PayrollEvent`** — the submitted request and its processing state.
-
-- `idempotencyKey` (unique) — what makes duplicate submission impossible.
-- `payload` (JSONB) — type-specific fields. A new event type needs no migration.
-- `sequence` (unique, autoincrement) — the order the system _accepted_ events,
-  which is what ordering is defined against. Queue arrival order is not
-  trustworthy once retries and delays are involved.
-- `lockedBy` / `lockedAt` — who is processing it and since when, so an
-  abandoned claim is detectable.
-- `failureCode` / `failureReason` — why it failed, in terms an engineer can act on.
-
-**`PayrollEventTransition`** — append-only audit trail, one row per state
-change. Never updated, so the history cannot be rewritten by a later attempt.
-
-**`EmployeePayrollProfile`** — the state events actually mutate: the projection
-standing in for the external payroll system. `lastAppliedSequence` records
-which event last wrote it.
-
-### Why a JSONB payload instead of a table per event type
-
-Three tables of near-identical shape, joined by type, would make adding
-`BONUS_PAYMENT` a migration plus a join plus a repository change. With JSONB
-plus a per-type validation class, adding an event type touches three files and
-no SQL. The trade-off is that Postgres no longer enforces payload shape — which
-is why validation is strict at the boundary and the payload is validated again
-against its type before it is ever persisted.
-
----
-
-## How each reliability requirement is met
-
-### Duplicate requests (#5)
-
-`idempotencyKey` is unique. A client may supply one; otherwise the service
-derives it as `sha256(type + employeeId + effectiveDate + canonical(payload))`,
-so a plain retry of the same body is recognized without the client doing
-anything.
-
-A repeated submission returns **200** with the original event; a new one
-returns **202**. Two _concurrent_ retries can both pass the pre-check, so the
-unique index — not the lookup — is the real guarantee: the loser catches
-`P2002` and returns the winner's event.
-
-The queue is deduplicated the same way: `jobId` is the event id, so one event
-can never have two jobs.
-
-### Temporary vs permanent failure (#4)
-
-Two error classes, in [`payroll.errors.ts`](apps/api/src/payroll/payroll.errors.ts):
-
-- `TransientPayrollError` → status `PENDING_RETRY`, rethrown so BullMQ retries
-  with exponential backoff. Becomes `FAILED` only once `MAX_ATTEMPTS` is spent,
-  with `failureCode = RETRIES_EXHAUSTED`.
-- `PermanentPayrollError` → straight to `FAILED` on the first attempt, and the
-  job is _completed_ rather than thrown, because further retries are waste.
-
-Business validation runs _before_ the provider call, so a permanent rejection
-never costs a network round trip. Unrecognized errors are treated as transient —
-an unknown failure gets the benefit of the doubt.
-
-### Multiple workers (#6)
-
-Claiming is a compare-and-set:
-
-```ts
-updateMany({
-  where: { id, status: { in: [ACCEPTED, PENDING_RETRY] } },
-  data: { status: PROCESSING, attempts: { increment: 1 }, lockedBy, lockedAt },
-});
-```
-
-Postgres serializes the two updates; exactly one gets `count === 1` and
-proceeds. The other yields. No distributed lock, no Redis lock — the row is
-already the shared resource.
-
-### Processing consistency after a crash (#8)
-
-The profile write and the flip to `SUCCEEDED` happen **in one transaction**.
-There is therefore no window where the change is applied but the event is not
-marked done. A redelivered job sees a finished event and no-ops.
-
-Belt and braces: the transaction also refuses to write when
-`profile.lastAppliedSequence >= event.sequence`, so even a doubly-executed
-transaction cannot apply the same change twice or resurrect a superseded one.
-
-### Ordering per employee (#9)
-
-Before claiming, the worker asks: _is any event for this employee with a lower
-`sequence` still open?_ If so it calls `job.moveToDelayed()` and throws
-`DelayedError` — which puts the job back **without consuming a retry attempt**,
-the reason this is not simply a thrown error.
-
-Different employees never block each other, so throughput stays parallel;
-`WORKER_CONCURRENCY` controls how parallel.
-
-### Worker failure and recovery (#7)
-
-BullMQ's stalled-job detection recovers the _job_. That leaves the _row_ stuck
-in `PROCESSING`, so [`RecoveryService`](apps/api/src/events/recovery.service.ts)
-sweeps every 30 seconds and:
-
-1. releases `PROCESSING` rows whose `lockedAt` is older than 2 minutes back to
-   `PENDING_RETRY`, recording a `WORKER_LOST` transition, and re-enqueues them;
-2. re-enqueues rows that are ready to run but have no job in Redis — the gap
-   that opens if the process dies between `COMMIT` and `queue.add`.
-
-The sweeper runs only in the worker process.
-
-#### Demonstrating it
-
-```bash
-./scripts/demo-crash.sh
-```
-
-It boots the stack with two workers, submits an event, waits until a worker has
-actually claimed it, then `SIGKILL`s **that specific container** — `lockedBy` is
-`<hostname>#<pid>` and a container's hostname is its short id, so the script
-kills the worker holding the claim rather than guessing. It lowers
-`STALE_CLAIM_MS` to 10s and pins `PAYROLL_LATENCY_MS` to 8s so there is a wide
-window to kill into and a short wait afterwards.
-
-```
-▸ SIGKILL the worker holding the claim
-c40126d22dcb
-
-▸ The row is now claimed by a worker that no longer exists
-  status=PROCESSING  lockedBy=c40126d22dcb#1  attempts=1
-
-▸ Outcome
-  SUCCEEDED after 2 attempt(s)
-
-  —             → ACCEPTED      Event accepted and queued for processing
-  ACCEPTED      → PROCESSING    Processing started by c40126d22dcb#1
-  PROCESSING    → PENDING_RETRY Recovered from lost worker
-  PENDING_RETRY → PROCESSING    Processing started by 888ed525e954#1
-  PROCESSING    → SUCCEEDED     Applied via PP-C961ABA81CEB
-
-  applied: 72000 EUR (event seq 34)
-```
-
-The second `PROCESSING` names a **different container** — the surviving worker
-picked up what the dead one dropped. Recovery takes roughly 30–40 seconds
-because two independent mechanisms have to fire: this sweep resets the row, and
-BullMQ's own stalled-job detection releases the job the dead worker still holds
-a lock on. Neither alone is enough, which is why both exist.
-
-### Extensibility (#10)
-
-Adding `BONUS_PAYMENT` means:
-
-1. a payload class in `dto/payloads.ts`, registered in `PAYLOAD_SCHEMAS`;
-2. a handler implementing `PayrollEventHandler`;
-3. one line in `HandlerRegistry`'s constructor and the Prisma enum.
-
-The queue, worker loop, retry policy, ordering logic, API and audit trail are
-untouched. Handlers are pure — `apply()` returns the mutation instead of
-performing it — precisely so the caller can keep it inside the success
-transaction.
-
----
-
-## API
-
-Swagger UI at `/api/docs`, OpenAPI JSON at `/api/docs-json`.
-
-```bash
-# Submit
-curl -X POST http://localhost:3001/api/events \
-  -H 'content-type: application/json' \
-  -d '{
-        "type": "SALARY_CHANGE",
-        "employeeId": "emp-1001",
-        "effectiveDate": "2026-09-01",
-        "payload": { "newSalary": 65000, "currency": "EUR" }
-      }'
-# → 202 {"id":"…","status":"ACCEPTED","sequence":1,"duplicate":false}
-
-# The same call again → 200 with duplicate:true and the same id.
-
-# Status, result and audit trail
-curl http://localhost:3001/api/events/<id>
-
-# Retry a FAILED event
-curl -X POST http://localhost:3001/api/events/<id>/retry
-# → 202 when the event dead-lettered after transient failures
-# → 409 when it failed permanently; add ?force=true to retry it anyway
-
-# What the events actually produced
-curl http://localhost:3001/api/employees/emp-1001/profile
-# → 404 until the employee's first event succeeds
-
-# Health
-curl http://localhost:3001/api/health
-```
-
-Demo a permanent failure with `"newSalary": 2000000` (above the approval
-limit), and an invalid request with `"currency": "XYZ"`.
-
-The profile endpoint is what makes the guarantees observable. Submit three
-salary changes for one employee and poll it: `lastAppliedSequence` climbs in
-accept order and settles on the last event, and a duplicate submission does not
-move it. Without this, ordering and single-apply could only be checked in a
-database client.
-
-Retry moves the event back to `PENDING_RETRY` and re-enqueues it. Two details
-matter: `attempts` is never reset (it records total effort, so `maxAttempts` is
-raised instead), and the finished BullMQ job is cleared first — an `add` for a
-`jobId` still sitting in the completed set is silently ignored, which would make
-the retry a no-op. The status guard on the update means two operators clicking
-retry at once produce one re-run, not two.
-
----
+Turn `PAYROLL_FAILURE_RATE` up if you want to see retries and dead-lettering
+without waiting for luck. The test suite pins it to `0` and injects failures
+explicitly instead.
 
 ## Testing
 
@@ -367,20 +110,11 @@ pnpm --filter api test        # unit — no infrastructure needed
 pnpm --filter api test:e2e    # functional + e2e — needs Postgres and Redis
 ```
 
-| Layer          | Where                         | What it proves                                                                                                                                                                                                                                                     |
-| -------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Unit**       | `src/**/*.spec.ts`            | Handler business rules; idempotency-key derivation; per-type payload validation. Prisma and BullMQ are doubles, so these are fast and deterministic.                                                                                                               |
-| **Functional** | `test/events.e2e-spec.ts`     | The HTTP contract against real Postgres and Redis, with **no worker running** — which is what proves submission does not process inline. Validation, 202 vs 200, concurrent deduplication, 404/400.                                                                |
-| **End-to-end** | `test/processing.e2e-spec.ts` | API + worker + both datastores in one process. Successful processing, result persistence, transient retry then success, permanent failure without retry, dead-lettering, duplicate applied once, redelivery no-op, per-employee ordering, crashed-worker recovery. |
-| **End-to-end** | `test/retry.e2e-spec.ts`      | Operator retry: a dead-lettered event re-runs and applies, the audit trail records the manual step, a permanent failure is refused without `force`, and two simultaneous retries apply the change once.                                                            |
-| **End-to-end** | `test/profile.e2e-spec.ts`    | The applied state read back over HTTP: 404 until an event succeeds, settles on the last event accepted, merges different event types into one record, and is untouched by a duplicate submission.                                                                  |
-
-The provider is stubbed per test rather than left random — a randomly failing
-dependency makes for a flaky suite, and each failure mode deserves its own
-deterministic test. `PAYROLL_FAILURE_RATE=0` is set in `test/setup-env.ts`.
-
-E2E runs with `maxWorkers: 1`: the tests share one Postgres and one Redis, and
-parallel suites would interfere with each other's queue state.
+| **Unit** | `src/**/*.spec.ts`
+| **Functional** | `test/events.e2e-spec.ts`
+| **End-to-end** | `test/processing.e2e-spec.ts`
+| **End-to-end** | `test/retry.e2e-spec.ts`
+| **End-to-end** | `test/profile.e2e-spec.ts`
 
 ---
 
@@ -388,95 +122,15 @@ parallel suites would interfere with each other's queue state.
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs three jobs:
 
-- **static** — formatting, lint, types, build. No services, so it fails fast.
-- **test** — spins up Postgres and Redis as service containers, applies
-  migrations, then runs unit and e2e suites. The reliability guarantees only
+- **static** does formatting, lint, types and build. No services, so it fails
+  fast on the cheap problems.
+- **test** spins up Postgres and Redis as service containers, applies
+  migrations, then runs the unit and e2e suites. The reliability guarantees only
   hold against real infrastructure, so testing them against mocks would prove
-  nothing.
-- **docker** — builds both images and boots the whole compose stack, polling
+  nothing worth knowing.
+- **docker** builds both images and boots the whole compose stack, polling
   `/api/health` until it answers. `docker compose up` is the first thing a
-  reviewer runs; CI should be what discovers it is broken.
-
----
-
-## Trade-offs and things I would do differently at scale
-
-- **Ordering via a delay loop.** A blocked job is re-delayed 500ms at a time.
-  Simple and correct, but it burns a Redis round trip per check. At high volume
-  I would use BullMQ Pro's job groups, or one queue partitioned by
-  `hash(employeeId)` so a single consumer owns each employee and ordering is
-  structural rather than checked.
-
-- **Polling frontend.** The UI polls every 2s. SSE or WebSockets would be
-  better, but polling is fewer moving parts for a demo, and the requirement is
-  that state changes are _observable_, not instant.
-
-- **Runtime image copies the whole `/app` tree.** pnpm's symlinked
-  `node_modules` only resolves inside the workspace root. `pnpm deploy` would
-  produce a smaller image; I chose the predictable option over the small one.
-
-- **The recovery sweep is a fixed 30s cron.** The staleness window is now
-  `STALE_CLAIM_MS`; the interval itself is still hardcoded because `@Cron` takes
-  a static expression and making it dynamic means managing the schedule by hand.
-
-- **`payload` as JSONB** trades database-level shape enforcement for
-  extensibility. Justified above; the mitigation is strict boundary validation.
-
-- **No authentication.** Explicitly out of scope. In production `POST /events`
-  would be service-to-service authenticated, and `employeeId` would be
-  authorization-checked rather than trusted from the body.
-
----
-
-## Decisions I was on the fence about
-
-Three things are deliberate rather than accidental, and each has a real argument
-on the other side.
-
-### A failed event does not block later events for the same employee
-
-The blocker check counts only `ACCEPTED`, `PROCESSING` and `PENDING_RETRY`, so a
-dead-lettered address change does not freeze that employee's payroll.
-
-This is safe **because every payload carries an absolute value, not a delta**,
-and the three event types write disjoint columns. A rejected salary change
-cannot make a later one wrong — the later one states the salary outright. If a
-`BONUS_PAYMENT` that accumulated, or a percentage raise, were added, this
-reasoning collapses and a failed predecessor would have to block.
-
-The interesting case is retrying a failure _after_ a later event has already
-landed. The `lastAppliedSequence` guard correctly refuses to overwrite the newer
-value — but it used to still record `Applied via …`, which is a lie in the audit
-trail. A superseded replay now finishes `SUCCEEDED` with
-`result: { applied: false, supersededBy: <sequence> }` and says so in its
-transition, so "nothing changed" is visible instead of silent.
-
-### The row owns the attempt budget, not BullMQ
-
-`attempts` on the row counts _total effort_ and is never reset — a manual retry
-raises `maxAttempts` instead. That deliberately diverges from BullMQ's own
-counter, which restarts whenever recovery re-enqueues an event as a new job.
-
-Two counters that disagree need one of them to be authoritative, and it has to
-be the row: it is the only one that survives a re-enqueue, and it is what the
-API and UI display. `handleFailure` therefore reads `event.maxAttempts` rather
-than `job.opts.attempts`. BullMQ is the retry _transport_; Postgres decides when
-to give up.
-
-### Every worker runs the recovery sweep
-
-Three workers means three scans every 30 seconds racing on the same rows. The
-`updateMany` status guard makes that correct — exactly one worker wins each row
-— so this is waste, not a bug, and the sweep is two indexed queries.
-
-I looked at fixing it and chose not to. A Postgres advisory lock is the obvious
-tool, but session-scoped locks and a connection pool are a bad combination: the
-unlock can land on a different pooled connection than the lock, leaking it. The
-transaction-scoped variant releases correctly but would wrap Redis calls in a
-database transaction. A lease table works and needs a migration. None of that is
-worth it while the sweep costs two queries — but the sweep now reports how many
-rows it _actually_ reclaimed rather than how many it looked at, so the logs stay
-honest when workers race.
+  reviewer runs, so CI should be what finds out it is broken.
 
 ---
 
@@ -489,6 +143,7 @@ apps/
     src/
       config/           env validation
       events/           controller, service, handlers, processor, recovery
+      employees/        applied-state read model
       payroll/          simulated external provider + error taxonomy
       prisma/  redis/  queue/  health/
       main.ts           API entrypoint
@@ -496,6 +151,7 @@ apps/
     test/               functional + e2e suites
   web/                  Next.js frontend
 packages/               shared eslint / tsconfig / ui
+scripts/demo-crash.sh   live worker-crash recovery demo
 docker-compose.yml
 .github/workflows/ci.yml
 ```
